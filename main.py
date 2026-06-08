@@ -1,7 +1,13 @@
 import os
 import sys
 import subprocess
+import re
 from ollama import Client
+
+# Configuration Constants
+OLLAMA_HOST = 'http://host.docker.internal:11434'
+MODEL_NAME = 'gemma4'
+TIMEOUT_SECONDS = 120  # Generous timeout for local LLM generation
 
 def run_git_command(args, error_msg):
     """Helper to run git commands safely with error handling."""
@@ -15,80 +21,107 @@ def run_git_command(args, error_msg):
         print("Error: 'git' command not found. Is it installed?", file=sys.stderr)
         sys.exit(1)
 
+def clean_markdown_block(text):
+    """Safely strips markdown code block wrappers (``` or ```markdown) using regex."""
+    text = text.strip()
+    # Matches ```optional_language_name ... ``` capturing the inside content
+    cleaned = re.sub(r'^```[a-zA-Z]*\n?(.*?)\n?```$', r'\1', text, flags=re.DOTALL)
+    return cleaned.strip()
+
 def get_project_context():
     """Reads project text files to give the AI context for writing/updating README."""
     context = ""
-    # Look for common code files to explain, avoiding large binary/ignored directories
-    ignored_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'env'}
-    allowed_extensions = {'.py', '.js', '.ts', '.go', '.rs', '.json', '.sh', '.yml', '.yaml', '.txt', '.html', 'hs', '.md', '.css'}
+    ignored_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'env', 'dist', 'build'}
+    allowed_extensions = {
+        '.py', '.js', '.ts', '.go', '.rs', '.json', '.sh', 
+        '.yml', '.yaml', '.txt', '.html', '.hs', '.md', '.css'
+    }
+    
+    # Track character count to avoid overwhelming local LLM context windows
+    max_total_chars = 50000 
     
     for root, dirs, files in os.walk('.'):
         dirs[:] = [d for d in dirs if d not in ignored_dirs]
         for file in files:
+            if len(context) >= max_total_chars:
+                break
+                
             _, ext = os.path.splitext(file)
             if ext in allowed_extensions:
                 file_path = os.path.join(root, file)
                 try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        context += f"\n--- File: {file_path} ---\n{f.read()[:2000]}\n" # Limit size per file
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        file_content = f.read(2000) # Limit size per file
+                        context += f"\n--- File: {file_path} ---\n{file_content}\n"
                 except Exception:
-                    pass
+                    pass # Gracefully skip unreadable files
+                    
     return context
 
 def handle_readme(client):
-    """Asks the user if they want to create/update the README using AI context."""
-    user_choice = input("\nDo you want to generate or update README.md? (y/N): ").lower()
+    """Asks the user if they want to create/update the README using defensive AI context."""
+    user_choice = input("\nDo you want to generate or update README.md defensively? (y/N): ").lower().strip()
     if user_choice != 'y':
         return
 
     readme_path = "README.md"
     readme_exists = os.path.exists(readme_path)
     
-    # Read existing content if it exists
     existing_readme_content = ""
     if readme_exists:
-        with open(readme_path, 'r', encoding='utf-8') as f:
-            existing_readme_content = f.read()
+        try:
+            with open(readme_path, 'r', encoding='utf-8') as f:
+                existing_readme_content = f.read()
+        except Exception as e:
+            print(f"Warning: Could not read existing README: {e}")
 
+    print("Gathering local file structure context...")
     project_code = get_project_context()
 
+    # --- DEFENSIVE PROMPT BASE ---
+    defensive_rules = (
+        "\n\nCRITICAL DEFENSIVE WRITING RULES:\n"
+        "1. DO NOT extrapolate, assume, or guess functionality. If a feature or variable's purpose is not "
+        "explicitly clear from the source code, DO NOT mention it or invent a purpose.\n"
+        "2. AVOID ALL AMBIGUOUS WORDS. Do not use phrases like 'easy to use', 'robust', 'scalable', 'fast', "
+        "'various utilities', 'etc.', 'should work', 'optimized', or 'flexible'. Stick entirely to objective facts.\n"
+        "3. Every instruction must be explicit. Do not say 'Install dependencies.' Say 'Run `pip install -r requirements.txt`'. "
+        "If you do not see a requirements file, list the exact imports used in the scripts.\n"
+        "4. Output ONLY the raw markdown content. No conversational text, intro, or markdown outer code blocks."
+    )
+
     if readme_exists:
-        print("Analyzing current README and repository files to write an update...")
+        print("Analyzing current README and repository files to write a defensive update...")
         system_instruction = (
-            "You are a technical documentation assistant. Update the existing README.md file "
-            "based on the provided repository code context. Improve formatting, explain any new structures, "
-            "and fix omissions. Output ONLY the raw markdown content of the new README.md. No notes or markdown wrappers."
-        )
+            "You are a strict technical documentation auditor. Update the existing README.md file "
+            "based strictly on the provided repository code context. Eliminate fluff, replace vague descriptions "
+            "with precise technical definitions, and map features directly to existing files."
+        ) + defensive_rules
         prompt_content = f"Existing README:\n{existing_readme_content}\n\nCurrent Repository Files:\n{project_code}"
     else:
-        print("Analyzing repository files to generate a new README.md...")
+        print("Analyzing repository files to generate a defensive README.md from scratch...")
         system_instruction = (
-            "You are a technical documentation assistant. Generate a professional, comprehensive README.md file "
-            "for this project from scratch using the provided source code context. Include project purpose, architecture, "
-            "prerequisites, usage instructions, and clean markdown layouts. Output ONLY the raw markdown content. No conversational text."
-        )
+            "You are a strict technical documentation auditor. Generate a comprehensive, factual README.md file "
+            "for this project from scratch using only the provided source code context. Include exact project purpose, "
+            "file architecture, exact prerequisites derived from code imports, and precise usage instructions."
+        ) + defensive_rules
         prompt_content = f"Current Repository Files:\n{project_code}"
 
     try:
         response = client.chat(
-            model="gemma4", 
+            model=MODEL_NAME, 
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt_content}
-            ]
+            ],
+            options={"timeout": TIMEOUT_SECONDS}
         )
-        new_readme_text = response['message']['content'].strip()
-        
-        # Clean markdown code block wraps if the AI accidentally added them
-        if new_readme_text.startswith("```markdown"):
-            new_readme_text = new_readme_text[11:-3].strip()
-        elif new_readme_text.startswith("```"):
-            new_readme_text = new_readme_text[3:-3].strip()
+        new_readme_text = clean_markdown_block(response['message']['content'])
 
         with open(readme_path, 'w', encoding='utf-8') as f:
             f.write(new_readme_text)
             
-        print(f"Successfully {'updated' if readme_exists else 'created'} README.md!")
+        print(f"Successfully generated defensive README.md!")
         
     except Exception as e:
         print(f"Failed to generate README via Ollama: {e}", file=sys.stderr)
@@ -117,8 +150,7 @@ def handle_git_add():
         print(f"Staged: {user_choice}")
 
 def main():
-    # Setup Ollama Client
-    client = Client(host='http://host.docker.internal:11434')
+    client = Client(host=OLLAMA_HOST)
 
     # Step 1: Manage Documentation Feature
     handle_readme(client)
@@ -143,22 +175,28 @@ def main():
     print("\nGenerating commit message via Ollama...")
     try:
         response = client.chat(
-            model="gemma4", 
+            model=MODEL_NAME, 
             messages=[
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": f"Here is the git diff:\n\n{diff_text}"}
-            ]
+            ],
+            options={"timeout": TIMEOUT_SECONDS}
         )
-        commit_msg = response['message']['content'].strip()
+        commit_msg = clean_markdown_block(response['message']['content'])
     except Exception as e:
-        print(f"Failed to connect to Ollama: {e}", file=sys.stderr)
+        print(f"Failed to connect to Ollama or process data: {e}", file=sys.stderr)
         sys.exit(1)
 
     print(f"\nProposed Commit Message:\n{'-'*25}\n{commit_msg}\n{'-'*25}")
 
-    # Step 5: Commit the changes
-    user_commit = input("Apply this commit? (y/N): ").lower()
-    if user_commit != 'y':
+    # Step 5: Commit the changes with fallback
+    user_commit = input("Apply this commit? (y/Edit/N): ").lower().strip()
+    if user_commit == 'e' or user_commit == 'edit':
+        commit_msg = input("Enter custom commit message: ").strip()
+        if not commit_msg:
+            print("Empty commit message. Aborting.")
+            return
+    elif user_commit != 'y':
         print("Commit aborted.")
         return
         
@@ -166,7 +204,7 @@ def main():
     print("Changes committed successfully!")
 
     # Step 6: Push the changes
-    user_push = input("\nPush changes to remote repository? (y/N): ").lower()
+    user_push = input("\nPush changes to remote repository? (y/N): ").lower().strip()
     if user_push == 'y':
         print("Pushing to remote...")
         run_git_command(["git", "push"], "Push failed")
