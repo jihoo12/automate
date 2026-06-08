@@ -20,7 +20,7 @@ def get_project_context():
     context = ""
     # Look for common code files to explain, avoiding large binary/ignored directories
     ignored_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'env'}
-    allowed_extensions = {'.py', '.js', '.ts', '.go', '.rs', '.json', '.sh', '.yml', '.yaml', '.txt'}
+    allowed_extensions = {'.py', '.js', '.ts', '.go', '.rs', '.json', '.sh', '.yml', '.yaml', '.txt', '.html', 'hs', '.md', '.css'}
     
     for root, dirs, files in os.walk('.'):
         dirs[:] = [d for d in dirs if d not in ignored_dirs]
