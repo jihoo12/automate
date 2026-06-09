@@ -34,7 +34,7 @@ def get_project_context():
     ignored_dirs = {'.git', '__pycache__', 'node_modules', 'venv', '.venv', 'env', 'dist', 'build'}
     allowed_extensions = {
         '.py', '.js', '.ts', '.go', '.rs', '.json', '.sh', 
-        '.yml', '.yaml', '.txt', '.html', '.hs', '.md', '.css'
+        '.yml', '.yaml', '.txt', '.html', '.hs', '.md', '.css','.nix'
     }
     
     # Track character count to avoid overwhelming local LLM context windows
